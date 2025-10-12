@@ -96,6 +96,9 @@ impl CameraUniform {
 
     fn update_view_proj(&mut self, camera: &Camera) {
         self.view_proj = camera.build_view_projection_matrix().into();
+        // if NaN models wont appear
+        // log::info!("Projection Matrix {:?}", self.view_proj);
+
     }
 }
 struct CameraController {
@@ -396,19 +399,31 @@ impl State {
             ],
             label: Some("diffuse_bind_group"),
         });
-        let camera = Camera {
-            // position the camera 1 unit up and 2 units back
-            // +z is out of the screen
-            eye: (0.0, 1.0, 2.0).into(),
-            // have it look at the origin
-            target: (0.0, 0.0, 0.0).into(),
-            // which way is "up"
-            up: cgmath::Vector3::unit_y(),
-            aspect: config.width as f32 / config.height as f32,
-            fovy: 45.0,
-            znear: 0.1,
-            zfar: 100.0,
+
+        // https://github.com/sotrh/learn-wgpu/issues/623#issuecomment-3215360477
+        let mut camera = Camera {
+        eye: (0.0, 1.0, 2.0).into(),
+        target: (0.0, 0.0, 0.0).into(),
+        up: cgmath::Vector3::unit_y(),
+        aspect: 1.0,   // default aspect ratio, this is ` config.width as f32 / config.height as f32 ` in the tutorial
+        fovy: 45.0,    // default field of view
+        znear: 0.1,    // > 0
+        zfar: 100.0,   // > znear
         };
+
+        // let camera = Camera {
+        //     // position the camera 1 unit up and 2 units back
+        //     // +z is out of the screen
+        //     eye: (0.0, 1.0, 2.0).into(),
+        //     // have it look at the origin
+        //     target: (0.0, 0.0, 0.0).into(),
+        //     // which way is "up"
+        //     up: cgmath::Vector3::unit_y(),
+        //     aspect: config.width as f32 / config.height as f32,
+        //     fovy: 45.0,
+        //     znear: 0.1,
+        //     zfar: 100.0,
+        // };
 
         let mut camera_uniform = CameraUniform::new();
         camera_uniform.update_view_proj(&camera);
@@ -531,9 +546,14 @@ impl State {
         });
 
         let obj_model =
-            resources::load_model("mobile-pokemon-duel-006-charizard/source/Mobile - Pokemon Duel - 006 - Charizard/Charizard.obj", &device, &queue, &texture_bind_group_layout)
+            resources::load_model("charizard/Charizard.obj", &device, &queue, &texture_bind_group_layout)
                 .await
                 .unwrap();
+
+        log::info!("Model loaded with {} meshes, {} materials", obj_model.meshes.len(), obj_model.materials.len());
+        for (i, mesh) in obj_model.meshes.iter().enumerate() {
+            log::info!("  Mesh {}: {} indices", i, mesh.num_elements);
+        }
 
         Ok(Self {
             surface,
@@ -563,13 +583,14 @@ impl State {
         })
     }
     fn update(&mut self) {
-        self.camera_controller.update_camera(&mut self.camera);
-        self.camera_uniform.update_view_proj(&self.camera);
-        self.queue.write_buffer(
-            &self.camera_buffer,
-            0,
-            bytemuck::cast_slice(&[self.camera_uniform]),
-        );
+            self.camera_controller.update_camera(&mut self.camera);
+            self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+            self.camera_uniform.update_view_proj(&self.camera);
+            self.queue.write_buffer(
+                        &self.camera_buffer,
+                        0,
+                        bytemuck::cast_slice(&[self.camera_uniform]),
+            );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -631,14 +652,10 @@ impl State {
         // render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16); // 1.
         // render_pass.draw_indexed(0..self.num_indices, 0, 0..self.instances.len() as u32);
 
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
-        render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-
         use model::DrawModel;
-        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
 
         render_pass.set_pipeline(&self.render_pipeline);
+        render_pass.set_vertex_buffer(1, self.instance_buffer.slice(..));
 
         render_pass.draw_model_instanced(
             &self.obj_model,

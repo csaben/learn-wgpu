@@ -4,6 +4,51 @@ use wgpu::util::DeviceExt;
 
 use crate::{model, texture};
 
+
+
+#[cfg(target_arch = "wasm32")]
+fn format_url(file_name: &str) -> reqwest::Url {
+    let window = web_sys::window().unwrap();
+    let location = window.location();
+    let origin = location.origin().unwrap();
+    let base = reqwest::Url::parse(&format!("{}/res/", origin)).unwrap();
+    base.join(file_name).unwrap()
+}
+
+pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
+    #[cfg(target_arch = "wasm32")]
+    let txt = {
+        let url = format_url(file_name);
+        reqwest::get(url).await?.text().await?
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let txt = {
+        let path = std::path::Path::new(env!("OUT_DIR"))
+            .join("res")
+            .join(file_name);
+        std::fs::read_to_string(path)?
+    };
+
+    Ok(txt)
+}
+
+pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
+    #[cfg(target_arch = "wasm32")]
+    let data = {
+        let url = format_url(file_name);
+        reqwest::get(url).await?.bytes().await?.to_vec()
+    };
+    #[cfg(not(target_arch = "wasm32"))]
+    let data = {
+        let path = std::path::Path::new(env!("OUT_DIR"))
+            .join("res")
+            .join(file_name);
+        std::fs::read(path)?
+    };
+
+    Ok(data)
+}
+
 pub async fn load_texture(
     file_name: &str,
     device: &wgpu::Device,
@@ -39,12 +84,14 @@ pub async fn load_model(
         |p| {
             let obj_dir = obj_dir.clone();
             async move {
-                let full_path = if obj_dir.is_empty() {
+                // p is the material file path from the .obj file (e.g., "Charizard.mtl")
+                let mat_path = if obj_dir.is_empty() {
                     p.to_string()
                 } else {
                     format!("{}/{}", obj_dir, p)
                 };
-                let mat_text = load_string(&full_path).await.unwrap();
+                log::info!("Loading material file: {}", mat_path);
+                let mat_text = load_string(&mat_path).await.unwrap();
                 tobj::load_mtl_buf(&mut BufReader::new(Cursor::new(mat_text)))
             }
         },
@@ -53,11 +100,17 @@ pub async fn load_model(
 
     let mut materials = Vec::new();
     for m in obj_materials? {
+        log::info!(
+            "Loading material: {} with texture: {}",
+            m.name,
+            m.diffuse_texture
+        );
         let texture_path = if obj_dir.is_empty() {
             m.diffuse_texture.clone()
         } else {
             format!("{}/{}", obj_dir, m.diffuse_texture)
         };
+        log::info!("Texture path: {}", texture_path);
         let diffuse_texture = load_texture(&texture_path, device, queue).await?;
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             layout,
@@ -80,6 +133,7 @@ pub async fn load_model(
             bind_group,
         })
     }
+    log::info!("Loaded {} materials", materials.len());
 
     let meshes = models
         .into_iter()
@@ -141,51 +195,19 @@ pub async fn load_model(
         })
         .collect::<Vec<_>>();
 
-    Ok(model::Model { meshes, materials })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn format_url(file_name: &str) -> reqwest::Url {
-    let window = web_sys::window().unwrap();
-    let location = window.location();
-    let mut origin = location.origin().unwrap();
-    if !origin.ends_with("learn-wgpu") {
-        origin = format!("{}/learn-wgpu", origin);
+    log::info!(
+        "Loaded {} meshes from model {}",
+        meshes.len(),
+        file_name
+    );
+    for (i, mesh) in meshes.iter().enumerate() {
+        log::info!(
+            "  Mesh {}: {} vertices/indices, material {}",
+            i,
+            mesh.num_elements,
+            mesh.material
+        );
     }
-    let base = reqwest::Url::parse(&format!("{}/", origin,)).unwrap();
-    base.join(file_name).unwrap()
-}
 
-pub async fn load_string(file_name: &str) -> anyhow::Result<String> {
-    #[cfg(target_arch = "wasm32")]
-    let txt = {
-        let url = format_url(file_name);
-        reqwest::get(url).await?.text().await?
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let txt = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
-        std::fs::read_to_string(path)?
-    };
-
-    Ok(txt)
-}
-
-pub async fn load_binary(file_name: &str) -> anyhow::Result<Vec<u8>> {
-    #[cfg(target_arch = "wasm32")]
-    let data = {
-        let url = format_url(file_name);
-        reqwest::get(url).await?.bytes().await?.to_vec()
-    };
-    #[cfg(not(target_arch = "wasm32"))]
-    let data = {
-        let path = std::path::Path::new(env!("OUT_DIR"))
-            .join("res")
-            .join(file_name);
-        std::fs::read(path)?
-    };
-
-    Ok(data)
+    Ok(model::Model { meshes, materials })
 }
