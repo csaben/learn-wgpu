@@ -10,6 +10,7 @@ use winit::{
     window::Window,
 };
 
+pub mod fire;
 pub mod model;
 pub mod resources;
 pub mod texture;
@@ -98,7 +99,6 @@ impl CameraUniform {
         self.view_proj = camera.build_view_projection_matrix().into();
         // if NaN models wont appear
         // log::info!("Projection Matrix {:?}", self.view_proj);
-
     }
 }
 struct CameraController {
@@ -292,6 +292,9 @@ pub struct State {
     window: Arc<Window>,
     obj_model: Model,
     depth_texture: texture::Texture,
+    fire_system: fire::FireSystem,
+    last_update: std::time::Instant,
+    fire_enabled: bool,
 }
 
 impl State {
@@ -402,13 +405,13 @@ impl State {
 
         // https://github.com/sotrh/learn-wgpu/issues/623#issuecomment-3215360477
         let mut camera = Camera {
-        eye: (0.0, 1.0, 2.0).into(),
-        target: (0.0, 0.0, 0.0).into(),
-        up: cgmath::Vector3::unit_y(),
-        aspect: 1.0,   // default aspect ratio, this is ` config.width as f32 / config.height as f32 ` in the tutorial
-        fovy: 45.0,    // default field of view
-        znear: 0.1,    // > 0
-        zfar: 100.0,   // > znear
+            eye: (0.0, 1.0, 2.0).into(),
+            target: (0.0, 0.0, 0.0).into(),
+            up: cgmath::Vector3::unit_y(),
+            aspect: 1.0, // default aspect ratio, this is ` config.width as f32 / config.height as f32 ` in the tutorial
+            fovy: 45.0,  // default field of view
+            znear: 0.1,  // > 0
+            zfar: 100.0, // > znear
         };
 
         // let camera = Camera {
@@ -545,15 +548,31 @@ impl State {
             cache: None,     // 6.
         });
 
-        let obj_model =
-            resources::load_model("charizard/Charizard.obj", &device, &queue, &texture_bind_group_layout)
-                .await
-                .unwrap();
+        let obj_model = resources::load_model(
+            "charizard/Charizard.obj",
+            &device,
+            &queue,
+            &texture_bind_group_layout,
+        )
+        .await
+        .unwrap();
 
-        log::info!("Model loaded with {} meshes, {} materials", obj_model.meshes.len(), obj_model.materials.len());
+        log::info!(
+            "Model loaded with {} meshes, {} materials",
+            obj_model.meshes.len(),
+            obj_model.materials.len()
+        );
         for (i, mesh) in obj_model.meshes.iter().enumerate() {
             log::info!("  Mesh {}: {} indices", i, mesh.num_elements);
         }
+
+        // Create fire system positioned at Charizard's mouth
+        // Based on model analysis:
+        // - Model bounds: Y[0.0 to 0.909], Z[-0.493 to 0.493]
+        // - Mouth is at ~80% height, front of face
+        let fire_origin = [0.0, 0.727, 0.593]; // Jaw height, in front of snout
+        let fire_system =
+            fire::FireSystem::new(&device, &config, &camera_bind_group_layout, fire_origin);
 
         Ok(Self {
             surface,
@@ -580,17 +599,29 @@ impl State {
             instance_buffer,
             depth_texture,
             obj_model,
+            fire_system,
+            last_update: std::time::Instant::now(),
+            fire_enabled: true, // Start with fire on
         })
     }
     fn update(&mut self) {
-            self.camera_controller.update_camera(&mut self.camera);
-            self.camera.aspect = self.config.width as f32 / self.config.height as f32;
-            self.camera_uniform.update_view_proj(&self.camera);
-            self.queue.write_buffer(
-                        &self.camera_buffer,
-                        0,
-                        bytemuck::cast_slice(&[self.camera_uniform]),
-            );
+        self.camera_controller.update_camera(&mut self.camera);
+        self.camera.aspect = self.config.width as f32 / self.config.height as f32;
+        self.camera_uniform.update_view_proj(&self.camera);
+        self.queue.write_buffer(
+            &self.camera_buffer,
+            0,
+            bytemuck::cast_slice(&[self.camera_uniform]),
+        );
+
+        // Update fire system (only if enabled)
+        let now = std::time::Instant::now();
+        let dt = (now - self.last_update).as_secs_f32();
+        self.last_update = now;
+
+        if self.fire_enabled {
+            self.fire_system.update(dt);
+        }
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -663,6 +694,11 @@ impl State {
             &self.camera_bind_group,
         );
 
+        // Render fire system (render after model so fire is on top with proper blending)
+        if self.fire_enabled {
+            self.fire_system.render(&self.queue, &mut render_pass, &self.camera_bind_group);
+        }
+
         // 2.
 
         drop(render_pass);
@@ -676,6 +712,10 @@ impl State {
     fn handle_key(&mut self, event_loop: &ActiveEventLoop, code: KeyCode, is_pressed: bool) {
         match (code, is_pressed) {
             (KeyCode::Escape, true) => event_loop.exit(),
+            (KeyCode::Space, true) => {
+                self.fire_enabled = !self.fire_enabled;
+                log::info!("Fire {}", if self.fire_enabled { "enabled" } else { "disabled" });
+            }
             _ => self.camera_controller.handle_key(code, is_pressed),
         }
     }
